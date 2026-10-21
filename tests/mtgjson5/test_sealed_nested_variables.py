@@ -73,7 +73,7 @@ def test_battle_pack_published_outcomes(code, expected_count, tmp_path, caplog):
             "sealedProduct": {name: "product-id", definition["contents"]["sealed"][0]["name"]: "booster-id"},
         }
     }
-    compiled, _ = compile_contents(products_dir, None, uuid_map)
+    compiled, _ = compile_contents(products_dir, uuid_map)
     assert "not found" not in caplog.text
     frame = pl.concat(
         [

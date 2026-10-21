@@ -1,12 +1,9 @@
-"""Reading mtg-sealed-content in either on-disk layout.
+"""Reading mtg-sealed-content's product YAML.
 
-mtg-sealed-content keeps each sealed product in two files today: its
-definition in data/products/SET.yaml and what is inside it in
-data/contents/SET.yaml. It is folding the second into the first as a nested
-``contents`` key and dropping data/contents/ altogether. Until that lands
-MTGJSON reads both layouts, deciding once per tarball (merged exactly when it
-has no data/contents/), and the same data has to compile to exactly the same
-products, contents and deck map either way.
+mtg-sealed-content keeps each sealed product in data/products/SET.yaml, with
+what is inside it nested under a ``contents`` key. It used to keep the contents
+in data/contents/SET.yaml (folded in by mtg-sealed-content#782); a file there
+is ignored, so it can no longer change what the products compile to.
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ PRODUCTS = {
     },
 }
 
-# What data/contents/ holds for the products above, placeholders included.
+# What each product nests under ``contents``; unresearched products have none.
 CONTENTS = {
     "tst": {
         # Sorted product names often put a copy ahead of the product it copies.
@@ -77,10 +74,8 @@ CONTENTS = {
                 {"card": [{"set": "tst", "number": 3, "name": "Third Card"}]},
             ],
         },
-        # Not researched yet
-        "Test Showdown Booster": [],
     },
-    "ts2": {"Second Set Booster Pack": {}, "Second Set Bundle": None},
+    "ts2": {},
 }
 
 
@@ -89,21 +84,13 @@ def _dump(path: Path, data: dict) -> None:
     path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
 
 
-def _write_split(root: Path) -> tuple[Path, Path]:
+def _write_products(root: Path, with_contents: bool = True) -> Path:
     for code, products in PRODUCTS.items():
-        _dump(root / "data" / "products" / f"{code.upper()}.yaml", {"code": code, "products": products})
-        _dump(root / "data" / "contents" / f"{code.upper()}.yaml", {"code": code, "products": CONTENTS[code]})
-    return root / "data" / "products", root / "data" / "contents"
-
-
-def _write_merged(root: Path) -> Path:
-    """The same data after the migration: a placeholder becomes no contents key."""
-    for code, products in PRODUCTS.items():
-        merged = {
-            name: {**info, "contents": CONTENTS[code][name]} if CONTENTS[code][name] else dict(info)
+        entries = {
+            name: {**info, "contents": CONTENTS[code][name]} if with_contents and name in CONTENTS[code] else dict(info)
             for name, info in products.items()
         }
-        _dump(root / "data" / "products" / f"{code.upper()}.yaml", {"code": code, "products": merged})
+        _dump(root / "data" / "products" / f"{code.upper()}.yaml", {"code": code, "products": entries})
     return root / "data" / "products"
 
 
@@ -120,45 +107,35 @@ def _uuid_map() -> dict:
 
 
 def test_compile_products_drops_nested_contents(tmp_path):
-    split = compile_products(_write_split(tmp_path / "split")[0])
-    merged = compile_products(_write_merged(tmp_path / "merged"))
-
-    assert merged == split == PRODUCTS
+    assert compile_products(_write_products(tmp_path)) == PRODUCTS
 
 
-def test_sealed_products_frame_builds_from_merged_products(tmp_path):
+def test_sealed_products_frame_builds_from_products_with_contents(tmp_path):
     """Nested contents would reach the frame, and polars cannot build one list of mixed card numbers."""
-    split = compile_products(_write_split(tmp_path / "split")[0])
-    merged = compile_products(_write_merged(tmp_path / "merged"))
+    with_contents = compile_products(_write_products(tmp_path / "with"))
+    without = compile_products(_write_products(tmp_path / "without", with_contents=False))
 
-    frame = _to_lazyframe(_build_sealed_products_records(merged), "sealed_products", "sealed_products").collect()
-    expected = _to_lazyframe(_build_sealed_products_records(split), "sealed_products", "sealed_products").collect()
+    frame = _to_lazyframe(_build_sealed_products_records(with_contents), "sealed_products", "sealed_products").collect()
+    expected = _to_lazyframe(_build_sealed_products_records(without), "sealed_products", "sealed_products").collect()
 
     assert "contents" not in frame.columns
     assert frame.equals(expected)
 
 
-def test_compile_contents_matches_across_layouts(tmp_path, caplog):
-    products_dir, contents_dir = _write_split(tmp_path / "split")
-    merged_dir = _write_merged(tmp_path / "merged")
+def test_compile_contents(tmp_path, caplog):
+    products_dir = _write_products(tmp_path)
+    # An old data/contents/ tree next to it is not read.
+    _dump(tmp_path / "data" / "contents" / "TST.yaml", {"code": "tst", "products": {"Test Booster Pack": {}}})
 
     with caplog.at_level(logging.WARNING, logger="mtgjson5.pipeline.stages.sealed"):
-        split = compile_contents(products_dir, contents_dir, _uuid_map())
-        split_warnings = [r.getMessage() for r in caplog.records]
-        caplog.clear()
-        merged = compile_contents(merged_dir, None, _uuid_map())
-        merged_warnings = [r.getMessage() for r in caplog.records]
+        contents, deck_map = compile_contents(products_dir, _uuid_map())
 
-    assert merged == split
-    assert merged_warnings == split_warnings
-    assert split_warnings == [
+    assert [r.getMessage() for r in caplog.records] == [
         "Product ts2 - Second Set Booster Pack missing contents",
         "Product ts2 - Second Set Bundle missing contents",
         "Product tst - Test Showdown Booster missing contents",
     ]
-
-    contents, deck_map = merged
-    # Nothing researched in ts2, and the placeholder product is left out.
+    # Nothing researched in ts2, and the unresearched product is left out.
     assert list(contents) == ["tst"]
     assert list(contents["tst"]) == [
         "Test Anniversary Bundle",
@@ -168,6 +145,7 @@ def test_compile_contents_matches_across_layouts(tmp_path, caplog):
         "Test Mystery Box",
     ]
     assert contents["tst"]["Test Anniversary Bundle"] == contents["tst"]["Test Bundle"]
+    assert contents["tst"]["Test Booster Pack"]["pack"]
     assert contents["tst"]["Test Bundle"]["card"] == [
         {"name": "Test Card", "set": "tst", "number": "1", "uuid": "card-1", "foil": True}
     ]
@@ -184,17 +162,13 @@ def test_compile_contents_matches_across_layouts(tmp_path, caplog):
 
 TARBALL_ROOT = "mtgjson-mtg-sealed-content-0123abc/"
 SET_FILE = "code: tst\nproducts: {}\n"
-SPLIT_TARBALL = {
-    "README.md": "# mtg-sealed-content\n",
-    "data/products/TST.yaml": SET_FILE,
-    "data/contents/TST.yaml": SET_FILE,
-    "outputs/deck_map.json": "{}",
-}
-MERGED_TARBALL = {
+TARBALL = {
     "README.md": "# mtg-sealed-content\n",
     "data/products/TST.yaml": SET_FILE,
     "outputs/deck_map.json": "{}",
 }
+# A tarball that still carries a data/contents/ file, e.g. one an old branch brought back
+STRAY_CONTENTS_TARBALL = {**TARBALL, "data/contents/TST.yaml": SET_FILE}
 
 
 def _tarball(files: dict[str, str]) -> bytes:
@@ -235,7 +209,7 @@ class FakeSession:
         return FakeResponse(self._tarball)
 
 
-def _extract(cache_path: Path | None, session: FakeSession) -> tuple[Path, Path | None]:
+def _extract(cache_path: Path | None, session: FakeSession) -> Path:
     provider = SealedDataProvider(cache_path=cache_path)
     return asyncio.run(provider._fetch_and_extract_yaml(session))
 
@@ -245,46 +219,57 @@ def _yaml_names(directory: Path) -> list[str]:
 
 
 @pytest.mark.parametrize("cached", [True, False], ids=["cache_path", "tempdir"])
-@pytest.mark.parametrize(("files", "split"), [(SPLIT_TARBALL, True), (MERGED_TARBALL, False)], ids=["split", "merged"])
-def test_layout_follows_the_tarball(tmp_path, monkeypatch, files, split, cached):
+def test_extracts_only_the_product_files(tmp_path, monkeypatch, cached):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
-    products_dir, contents_dir = _extract(tmp_path if cached else None, FakeSession(_tarball(files)))
+    products_dir = _extract(tmp_path if cached else None, FakeSession(_tarball(TARBALL)))
 
     assert _yaml_names(products_dir) == ["TST.yaml"]
-    if split:
-        assert contents_dir == products_dir.parent / "contents"
-        assert _yaml_names(contents_dir) == ["TST.yaml"]
-    else:
-        assert contents_dir is None
-        assert not (products_dir.parent / "contents").exists()
+    assert not (products_dir.parent / "contents").exists()
+
+
+def test_a_stray_data_contents_file_is_ignored(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="mtgjson5.providers.github.provider"):
+        products_dir = _extract(tmp_path, FakeSession(_tarball(STRAY_CONTENTS_TARBALL)))
+
+    assert _yaml_names(products_dir) == ["TST.yaml"]
+    assert not (products_dir.parent / "contents").exists()
+    assert "Ignoring 1 data/contents/ files in the sealed tarball" in caplog.text
+    assert "data/contents/TST.yaml" in caplog.text
 
 
 def test_extraction_starts_from_an_empty_directory(tmp_path):
-    """A data/contents/ tree left from an earlier run must not make a merged tarball look split."""
-    stale = tmp_path / "sealed_yaml" / "data" / "contents" / "OLD.yaml"
-    stale.parent.mkdir(parents=True)
-    stale.write_text(SET_FILE)
-    # ... nor may anything a crashed extraction left in the staging directory.
+    """Nothing a crashed extraction left in the staging directory may survive."""
     leftover = tmp_path / "sealed_yaml.partial" / "data" / "products" / "GONE.yaml"
     leftover.parent.mkdir(parents=True)
     leftover.write_text(SET_FILE)
 
-    products_dir, contents_dir = _extract(tmp_path, FakeSession(_tarball(MERGED_TARBALL)))
+    products_dir = _extract(tmp_path, FakeSession(_tarball(TARBALL)))
 
-    assert contents_dir is None
     assert _yaml_names(products_dir) == ["TST.yaml"]
-    assert not (tmp_path / "sealed_yaml" / "data" / "contents").exists()
     assert not (tmp_path / "sealed_yaml.partial").exists()
 
 
-@pytest.mark.parametrize(("files", "split"), [(SPLIT_TARBALL, True), (MERGED_TARBALL, False)], ids=["split", "merged"])
-def test_cached_extraction_keeps_its_layout(tmp_path, files, split):
-    session = FakeSession(_tarball(files))
+def test_cached_extraction_is_reused(tmp_path):
+    session = FakeSession(_tarball(TARBALL))
 
     first = _extract(tmp_path, session)
-    products_dir, contents_dir = _extract(tmp_path, session)
+    second = _extract(tmp_path, session)
 
-    assert (products_dir, contents_dir) == first
-    assert (contents_dir is not None) == split
+    assert second == first
     assert session.calls == 1
+
+
+def test_a_cached_old_layout_extraction_is_fetched_again(tmp_path):
+    """Its product files have no nested contents, so using it would empty every product."""
+    for directory in ("products", "contents"):
+        stale = tmp_path / "sealed_yaml" / "data" / directory / "OLD.yaml"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(SET_FILE)
+    session = FakeSession(_tarball(TARBALL))
+
+    products_dir = _extract(tmp_path, session)
+
+    assert session.calls == 1
+    assert _yaml_names(products_dir) == ["TST.yaml"]
+    assert not (tmp_path / "sealed_yaml" / "data" / "contents").exists()

@@ -33,8 +33,7 @@ def compile_products(products_dir: Path) -> dict:
 
     Replicates: mtg-sealed-content/scripts/new_products_compiler.py
 
-    A product's nested ``contents`` (merged layout, see compile_contents) is
-    dropped. Contents are compiled on their own, and everything that reads
+    A product's nested ``contents`` (see compile_contents) is dropped. Contents are compiled on their own, and everything that reads
     this dict -- the sealed products frame, the UUID pins,
     build_pipeline_view -- expects the plain product definition.
 
@@ -544,25 +543,16 @@ def set_to_json(set_content: dict) -> dict:
     return {k: v for k, v in decoded.items() if v}
 
 
-def _iter_set_contents(products_dir: Path, contents_dir: Path | None) -> Iterator[tuple[str, dict]]:
+def _iter_set_contents(products_dir: Path) -> Iterator[tuple[str, dict]]:
     """Yield ``(set_code, {product_name: contents})`` for every set file.
 
-    With a contents_dir (split layout) that is each data/contents/SET.yaml as
-    is. Without one (merged layout) it is the ``contents`` nested under each
-    product in data/products/SET.yaml, read back into the same shape. A
-    product without that key has not been researched yet, which the split
-    layout spells as an empty placeholder, so it maps to None.
+    The contents are what is nested under each product's ``contents`` key in
+    data/products/SET.yaml. A product without that key has not been researched
+    yet, so it maps to None.
 
     The values are the parsed YAML objects themselves, not copies, so a
-    ``copy`` resolved against this mapping reaches its target's contents in
-    exactly the way it reaches the target's data/contents/ entry.
+    ``copy`` resolved against this mapping reaches its target's contents.
     """
-    if contents_dir is not None:
-        for set_file in sorted(contents_dir.glob("*.yaml")):
-            contents = yaml.safe_load(set_file.read_bytes())
-            yield contents["code"], contents["products"]
-        return
-
     for set_file in sorted(products_dir.glob("*.yaml")):
         data = yaml.safe_load(set_file.read_bytes())
         set_contents = {
@@ -571,21 +561,18 @@ def _iter_set_contents(products_dir: Path, contents_dir: Path | None) -> Iterato
         yield data["code"], set_contents
 
 
-def compile_contents(products_dir: Path, contents_dir: Path | None, uuid_map: dict) -> tuple[dict, dict]:
+def compile_contents(products_dir: Path, uuid_map: dict) -> tuple[dict, dict]:
     """Compile contents.json and deck_map.json from YAML source files.
 
     Replicates: mtg-sealed-content/scripts/product_contents_compiler.py
 
-    mtg-sealed-content is folding data/contents/SET.yaml into
-    data/products/SET.yaml as a nested ``contents`` key, and both layouts
-    compile to the same result. The caller decides the layout once for the
-    whole tree (merged exactly when it has no data/contents/, see
-    SealedDataProvider._fetch_and_extract_yaml), never per product.
+    Each product's contents are nested under its ``contents`` key in
+    data/products/SET.yaml. mtg-sealed-content folded its old
+    data/contents/SET.yaml files in there (mtg-sealed-content#782), and
+    nothing reads data/contents/ any more.
 
     Args:
         products_dir: Path to directory containing per-set product YAML files.
-        contents_dir: Path to directory containing per-set content YAML files,
-            or None for the merged layout, where products_dir holds both.
         uuid_map: UUID lookup map from build_uuid_map().
 
     Returns:
@@ -593,7 +580,7 @@ def compile_contents(products_dir: Path, contents_dir: Path | None, uuid_map: di
     """
     products_contents: dict = {}
 
-    for code, set_contents in _iter_set_contents(products_dir, contents_dir):
+    for code, set_contents in _iter_set_contents(products_dir):
         products_contents[code] = {}
 
         for name, p in set_contents.items():

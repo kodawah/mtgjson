@@ -50,11 +50,11 @@ def resolve_head_sha() -> str:
 
 
 def fetch_tarball(sha: str, cache_dir: Path) -> Path:
-    """Download the source tarball and extract product/content YAMLs.
+    """Download the source tarball and extract the product YAMLs.
 
-    Works for either source layout: data/contents/ is extracted when the
-    tarball has one (split layout) and is simply absent otherwise (merged
-    layout, contents nested in data/products/). See yaml_dirs().
+    Each product's contents are nested in its data/products/ file; a
+    data/contents/ file, which only a tarball older than
+    mtg-sealed-content#782 has, is not extracted.
     """
     import requests
 
@@ -83,35 +83,17 @@ def fetch_tarball(sha: str, cache_dir: Path) -> Path:
             if not member.name.startswith(prefix):
                 continue
             rel = member.name[len(prefix) :]
-            # Only extract data/products/*.yaml and data/contents/*.yaml. The
-            # directory is empty at this point, so the layout yaml_dirs() reads
-            # off it afterwards is this tarball's alone.
-            if rel.startswith(("data/products/", "data/contents/")) and rel.endswith(".yaml"):
+            # Only extract data/products/*.yaml
+            if rel.startswith("data/products/") and rel.endswith(".yaml"):
                 dest = extract_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 f = tf.extractfile(member)
                 if f is not None:
                     dest.write_bytes(f.read())
 
-    products_dir, contents_dir = yaml_dirs(extract_dir)
-    n_products = len(list(products_dir.glob("*.yaml")))
-    if contents_dir is None:
-        LOGGER.info("Extracted %d product YAMLs with nested contents (no data/contents/)", n_products)
-    else:
-        n_contents = len(list(contents_dir.glob("*.yaml")))
-        LOGGER.info("Extracted %d product YAMLs, %d content YAMLs", n_products, n_contents)
+    n_products = len(list((extract_dir / "data" / "products").glob("*.yaml")))
+    LOGGER.info("Extracted %d product YAMLs", n_products)
     return extract_dir
-
-
-def yaml_dirs(source_dir: Path) -> tuple[Path, Path | None]:
-    """Return (products_dir, contents_dir) for an extracted source tree.
-
-    contents_dir is None for the merged layout, where each product's contents
-    are nested in its data/products/ file and there is no data/contents/.
-    The layout holds for the whole tree, as in the GitHub provider.
-    """
-    contents_dir = source_dir / "data" / "contents"
-    return source_dir / "data" / "products", contents_dir if contents_dir.is_dir() else None
 
 
 def fetch_output(sha: str, name: str, cache_dir: Path) -> dict | None:
@@ -248,18 +230,15 @@ def validate_deck_map(source_dir: Path, allprintings_path: Path, expected: dict)
     """Validate the deck_map from compile_contents() against the fetched deck_map.json.
 
     mtg-sealed-content no longer publishes contents.json, so this is the only
-    parity check left on compile_contents(). The source tree may use either
-    layout.
+    parity check left on compile_contents().
     """
     from mtgjson5.pipeline.stages.sealed import build_uuid_map, compile_contents
 
     print("Building UUID map from AllPrintings.json ...")
     uuid_map = build_uuid_map(allprintings_path)
 
-    products_dir, contents_dir = yaml_dirs(source_dir)
-    layout = "merged" if contents_dir is None else "split"
-    print(f"Compiling deck_map from YAML sources ({layout} layout) ...")
-    _, deck_map_actual = compile_contents(products_dir, contents_dir, uuid_map)
+    print("Compiling deck_map from YAML sources ...")
+    _, deck_map_actual = compile_contents(source_dir / "data" / "products", uuid_map)
 
     diffs = deep_diff(expected, deck_map_actual)
     type_warnings = [d for d in diffs if d.startswith("TYPE WARNING")]
